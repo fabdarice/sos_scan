@@ -36,9 +36,10 @@ const csvWriterAll = createCsvWriter({
   append: true,
 })
 
+let provider;
 
 const main = async () => {
-  const provider = new ethers.providers.WebSocketProvider(process.env.WS_NODE_URI);
+  provider = new ethers.providers.WebSocketProvider(process.env.WS_NODE_URI);
   const contract = getSOSContract(provider);
   const opensea = new ethers.Contract(OPENSEA_ADDRESS, OPENSEA_ABI, provider);
 
