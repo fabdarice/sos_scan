@@ -35,13 +35,11 @@ const main = async () => {
 
   const opensea = new ethers.Contract(OPENSEA_ADDRESS, OPENSEA_ABI, provider);
 
-  // const endBlock = await provider.getBlockNumber();
-  // const endBlock = OPENSEA_START_BLOCK + 10000;
+  const endBlock = await provider.getBlockNumber();
   const interval = 1000;
-  const endBlock = 13933271
 
 
-  for (let i = 13933270; i < endBlock; i += interval) {
+  for (let i = OPENSEA_START_BLOCK; i < endBlock; i += interval) {
     const _endBlock = Math.min(endBlock, i + interval);
     console.log(`------ Scanning Block ${i} to ${_endBlock} ----------`);
     const task = parseAtomicMatch;
