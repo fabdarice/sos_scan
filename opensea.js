@@ -34,26 +34,92 @@ const main = async () => {
   provider = new ethers.providers.WebSocketProvider(process.env.WS_NODE_URI);
 
   const opensea = new ethers.Contract(OPENSEA_ADDRESS, OPENSEA_ABI, provider);
+  const startBlock = 12245029;
 
-  const endBlock = await provider.getBlockNumber();
-  const interval = 1000;
+  const lastBlock = await provider.getBlockNumber();
+  const endBlock = Math.min(startBlock + 5000, lastBlock);
+  const interval = 5000;
 
 
-  for (let i = OPENSEA_START_BLOCK; i < endBlock; i += interval) {
+  for (let i = startBlock; i < endBlock; i += interval) {
+    let tries = 0
     const _endBlock = Math.min(endBlock, i + interval);
     console.log(`------ Scanning Block ${i} to ${_endBlock} ----------`);
+    await sleep(100);
     const task = parseAtomicMatch;
-    const doTask = () => {
+    const doTask = (tries) => {
       task(opensea, i + 1, _endBlock)
         .then(() => {})
         .catch(async (error) => {
-          console.log("error occured:", error)
-          await sleep(Math.random() * 3000)
-          doTask()
+          console.log(`[${i} - ${_endBlock}] error occured:`, error)
+          if (tries < 2) {
+            await sleep(Math.random() * 3000)
+            tries += 1;
+            doTask(tries)
+          }
         })
     };
 
     doTask()
+  }
+}
+
+const _scanEvent = async (event, opensea) => {
+  let price, tokenName, isERC, buyer, seller;
+  const receipt = await opensea.provider.getTransactionReceipt(event.transactionHash);
+  for (const log of receipt.logs) {
+    if (log.topics.length == 3
+      && log.topics[0].toLowerCase() == TRANSFER_SIG.toLowerCase()
+      && ethers.BigNumber.from(log.data).eq(event.args["price"])
+    ) {
+      const token = new ethers.Contract(log.address, ERC20_ABI, opensea.provider);
+      price = formatUnits(event.args["price"], await token.decimals());
+      try {
+        tokenName = await token.symbol();
+      } catch(err) {
+        tokenName = "UNKNOWN";
+      }
+      isERC = true;
+      buyer = ethers.BigNumber.from(log.topics[1]).toHexString();
+      seller = ethers.BigNumber.from(log.topics[2]).toHexString();
+      break;
+    }
+    if (log.topics.length == 4
+      && log.topics[0].toLowerCase() == TRANSFER_SIG.toLowerCase()
+      && log.data == "0x"
+    ) {
+      buyer = ethers.BigNumber.from(log.topics[2]).toHexString();
+      seller = ethers.BigNumber.from(log.topics[1]).toHexString();
+    }
+  }
+  buyer = buyer || event.args["taker"];
+  seller = seller || event.args["maker"];
+  if (isERC) {
+    isERC = false;
+  } else {
+    price = formatEther(event.args["price"])
+    tokenName = "ETH"
+  }
+  let gasPrice, gasFee;
+  if (receipt.type == 0) {
+    // LEGACY
+    const tx = await opensea.provider.getTransaction(event.transactionHash);
+    gasFee = tx.gasPrice;
+  } else {
+    // EIP-1559
+    gasFee = receipt.effectiveGasPrice
+  }
+  gasPrice = receipt.gasUsed.mul(gasFee);
+  return {
+    buyer: buyer.toLowerCase(),
+    seller: seller.toLowerCase(),
+    amount: price,
+    token: tokenName,
+    txHash: event.transactionHash,
+    gasFee: formatUnits(gasFee, "gwei"),
+    gasPrice: formatEther(gasPrice),
+    blockNumber: event.blockNumber,
+    status: receipt.status,
   }
 }
 
@@ -64,60 +130,22 @@ const parseAtomicMatch = async (opensea, startBlock, endBlock) => {
 
   let data = []
   for (const event of events) {
-    let price, tokenName, isERC, buyer, seller;
-    const receipt = await opensea.provider.getTransactionReceipt(event.transactionHash);
-    for (const log of receipt.logs) {
-      if (log.topics.length == 3
-        && log.topics[0].toLowerCase() == TRANSFER_SIG.toLowerCase()
-        && ethers.BigNumber.from(log.data).eq(event.args["price"])
-      ) {
-        const token = new ethers.Contract(log.address, ERC20_ABI, opensea.provider);
-        price = formatUnits(event.args["price"], await token.decimals());
-        tokenName = await token.symbol();
-        isERC = true;
-        buyer = ethers.BigNumber.from(log.topics[1]).toHexString();
-        seller = ethers.BigNumber.from(log.topics[2]).toHexString();
-        break;
-      }
-      if (log.topics.length == 4
-        && log.topics[0].toLowerCase() == TRANSFER_SIG.toLowerCase()
-        && log.data == "0x"
-      ) {
-        buyer = ethers.BigNumber.from(log.topics[2]).toHexString();
-        seller = ethers.BigNumber.from(log.topics[1]).toHexString();
+    try {
+      data.push(await _scanEvent(event, opensea))
+      // csvWriter.writeRecords(res);
+    }
+     catch(err) {
+      console.log(`Error inside [${startBlock} - ${endBlock}] ${err}`);
+       try{
+         await sleep(3000);
+         data.push(await _scanEvent(event, opensea))
+        // csvWriter.writeRecords(res);
+       }
+       catch(err) {
+        console.log(`Error inside (2nd attempt) [${startBlock} - ${endBlock}] ${err}`);
       }
     }
-    buyer = buyer || event.args["taker"];
-    seller = seller || event.args["maker"];
-    if (isERC) {
-      isERC = false;
-    } else {
-      price = formatEther(event.args["price"])
-      tokenName = "ETH"
-    }
-    let gasPrice, gasFee;
-    if (receipt.type == 0) {
-      // LEGACY
-      const tx = await opensea.provider.getTransaction(event.transactionHash);
-      gasFee = tx.gasPrice;
-    } else {
-      // EIP-1559
-      gasFee = receipt.effectiveGasPrice
-    }
-    gasPrice = receipt.gasUsed.mul(gasFee);
-    data.push({
-      buyer: buyer,
-      seller: seller,
-      amount: price,
-      token: tokenName,
-      txHash: event.transactionHash,
-      gasFee: formatUnits(gasFee, "gwei"),
-      gasPrice: formatEther(gasPrice),
-      blockNumber: event.blockNumber,
-      status: receipt.status,
-    })
   }
-
   if (data.length > 0) {
     await csvWriter.writeRecords(data);
   }
